@@ -1,0 +1,110 @@
+# ==============================================================================
+# WireGuard Manager — Caddy v2 reverse proxy
+#
+# The Go app serves both the API (/api/*) and the SPA (history-API fallback)
+# from a single port.  The app listens on 127.0.0.1:8080 by default; see
+# /etc/wireguard-manager/app.yaml (listen field) or the --listen CLI flag.
+#
+# Caddy provisions TLS automatically via Let's Encrypt (or your ACME issuer).
+# No extra TLS config is needed — just point your DNS at this host.
+#
+# Usage:
+#   caddy fmt --overwrite scripts/Caddyfile     # format
+#   caddy validate --config scripts/Caddyfile   # dry-run check
+#   caddy run --config scripts/Caddyfile        # start (daemon)
+#   systemctl reload caddy                      # reload after edits
+#
+#   Secure cookies and client IP detection trust forwarded headers only when
+#   the request reaches the app from a loopback proxy.
+# ==============================================================================
+
+# --- Global options ----------------------------------------------------------
+{
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+
+	log {
+		output file /var/log/caddy/wireguard-manager_access.log {
+			roll_size 10mb
+			roll_keep 5
+			roll_gzip true
+		}
+		format console
+	}
+}
+
+# ---------------------------------------------------------------------------
+# PRODUCTION — public domain with auto HTTPS
+# ---------------------------------------------------------------------------
+# Replace wgm.example.com with your actual domain.
+# See the "Optional: IP allowlist" section below for restricting access.
+wgm.example.com {
+	# Security response headers (client-facing)
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+	}
+
+	# Reverse proxy to the Go backend (single binary serves API + SPA).
+	# Go handles SPA history-API fallback internally, so Caddy just proxies
+	# every request — no special try_files or @SPA matcher needed.
+	#
+	# Caddy automatically forwards X-Forwarded-For, X-Forwarded-Proto and
+	# X-Forwarded-Host. Set the real client IP for the backend's trust check.
+	reverse_proxy 127.0.0.1:8080 {
+		header_up Host {http.reverse_proxy.upstream.hostport}
+		header_up X-Real-IP {http.request.remote.host}
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Optional: IP allowlist — restrict admin access to trusted networks only
+# ---------------------------------------------------------------------------
+# The session cookie is HttpOnly + SameSite=Lax, but adding an IP filter at
+# the proxy layer provides defense-in-depth.  Enable by replacing the
+# simple reverse_proxy above with a matcher-based block:
+#
+#   wgm.example.com {
+#       @allow {
+#           remote_ip 10.0.0.0/8
+#           remote_ip 172.16.0.0/12
+#           remote_ip 192.168.0.0/16
+#           remote_ip 203.0.113.42/32   # your office/home IP
+#       }
+#       reverse_proxy @allow 127.0.0.1:8080 {
+#           header_up Host      {http.reverse_proxy.upstream.hostport}
+#           header_up X-Real-IP {http.request.remote.host}
+#       }
+#       respond "Forbidden" "403"
+#   }
+
+# ---------------------------------------------------------------------------
+# LOCAL / LAN — no TLS, bind to a local non-standard port
+# ---------------------------------------------------------------------------
+# Use this variant when you don't have a public domain (e.g. accessing the
+# UI over a local VPN or LAN).  Caddy will NOT attempt ACME; serve plain HTTP.
+#
+# 192.168.1.50:8443 {
+#     reverse_proxy 127.0.0.1:8080 {
+#         header_up Host      {http.reverse_proxy.upstream.hostport}
+#         header_up X-Real-IP {http.request.remote.host}
+#     }
+# }
+
+# ---------------------------------------------------------------------------
+# DEVELOPMENT — quick local HTTPS proxy for dev backend
+# ---------------------------------------------------------------------------
+# When running `make dev-backend` (Go on :18080), use Caddy locally for
+# HTTPS testing.  `tls internal` generates a self-signed cert automatically.
+#   Run:  caddy run --config scripts/Caddyfile-dev
+#
+# localhost:8443 {
+#     tls internal
+#     reverse_proxy 127.0.0.1:18080 {
+#         header_up Host      {http.reverse_proxy.upstream.hostport}
+#         header_up X-Real-IP {http.request.remote.host}
+#     }
+# }
